@@ -502,9 +502,13 @@ export function pathToRegexp(
   const items = paths.map((path) =>
     path instanceof TokenData ? path : parse(path, options),
   );
+  let combinations = 0;
 
   for (const { tokens } of items) {
     for (const seq of flatten(tokens, 0, [])) {
+      if (combinations++ >= 256) {
+        throw new TypeError("Too many path combinations");
+      }
       const regexp = sequenceToRegExp(seq, delimiter, keys);
       sources.push(regexp);
     }
@@ -555,7 +559,30 @@ function* flatten(
 function sequenceToRegExp(tokens: Flattened[], delimiter: string, keys: Keys) {
   let result = "";
   let backtrack = "";
-  let isSafeSegmentParam = true;
+  let wildcardBacktrack = "";
+  let prevCaptureType: 0 | 1 | 2 = 0;
+  let hasSegmentCapture = 0;
+
+  function hasInSegment(i: number, type: Flattened["type"]) {
+    while (++i < tokens.length) {
+      const token = tokens[i];
+      if (token.type === type) return true;
+      if (token.type === "text") {
+        if (token.value.includes(delimiter)) break;
+      }
+    }
+    return false;
+  }
+
+  function peekText(i: number) {
+    let result = "";
+    while (++i < tokens.length) {
+      const token = tokens[i];
+      if (token.type !== "text") break;
+      result += token.value;
+    }
+    return result;
+  }
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -563,40 +590,60 @@ function sequenceToRegExp(tokens: Flattened[], delimiter: string, keys: Keys) {
     if (token.type === "text") {
       result += escape(token.value);
       backtrack += token.value;
-      isSafeSegmentParam ||= token.value.includes(delimiter);
+      if (prevCaptureType === 2) wildcardBacktrack += token.value;
+      if (token.value.includes(delimiter)) hasSegmentCapture = 0;
+
       continue;
     }
 
     if (token.type === "param" || token.type === "wildcard") {
-      if (!isSafeSegmentParam && !backtrack) {
+      if (i > 0 && !backtrack) {
         throw new TypeError(`Missing text after "${token.name}": ${DEBUG_URL}`);
       }
 
       if (token.type === "param") {
-        result += `(${negate(delimiter, isSafeSegmentParam ? "" : backtrack)}+)`;
+        result += hasSegmentCapture
+          ? `(${negate(delimiter, backtrack)}+)`
+          : hasInSegment(i, "wildcard")
+            ? `(${negate(delimiter, peekText(i))}+)`
+            : `(${negate(delimiter, "")}+)`;
+
+        hasSegmentCapture |= prevCaptureType = 1;
       } else {
-        result += `([\\s\\S]+)`;
+        result +=
+          hasSegmentCapture & 2
+            ? `(${negate(backtrack, "")}+)`
+            : hasSegmentCapture & 1
+              ? `(${negate(wildcardBacktrack, "")}+)`
+              : wildcardBacktrack
+                ? `(${negate(wildcardBacktrack, "")}+|${negate(delimiter, "")}+)`
+                : `([^]+)`;
+
+        wildcardBacktrack = "";
+        hasSegmentCapture |= prevCaptureType = 2;
       }
 
       keys.push(token);
       backtrack = "";
-      isSafeSegmentParam = false;
       continue;
     }
+
+    throw new TypeError(`Unknown token type: ${(token as any).type}`);
   }
 
   return result;
 }
 
-function negate(delimiter: string, backtrack: string) {
-  if (backtrack.length < 2) {
-    if (delimiter.length < 2) return `[^${escape(delimiter + backtrack)}]`;
-    return `(?:(?!${escape(delimiter)})[^${escape(backtrack)}])`;
-  }
-  if (delimiter.length < 2) {
-    return `(?:(?!${escape(backtrack)})[^${escape(delimiter)}])`;
-  }
-  return `(?:(?!${escape(backtrack)}|${escape(delimiter)})[\\s\\S])`;
+/**
+ * Block backtracking on previous text/delimiter.
+ */
+function negate(a: string, b: string) {
+  if (b.length > a.length) return negate(b, a);
+
+  if (a === b) b = "";
+  if (b.length > 1) return `(?:(?!${escape(a)}|${escape(b)})[^])`;
+  if (a.length > 1) return `(?:(?!${escape(a)})[^${escape(b)}])`;
+  return `[^${escape(a + b)}]`;
 }
 
 /**

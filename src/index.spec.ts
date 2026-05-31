@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parse, compile, match, stringify } from "./index.js";
+import { parse, compile, match, stringify, pathToRegexp } from "./index.js";
 import {
   PARSER_TESTS,
   COMPILE_TESTS,
@@ -48,6 +48,16 @@ describe("path-to-regexp", () => {
         new TypeError(
           "Unterminated quote at 2: https://git.new/pathToRegexpError",
         ),
+      );
+    });
+  });
+
+  describe("pathToRegexp errors", () => {
+    it("should throw when too many alternative routes are generated", () => {
+      const segments = new Array(10).fill("{/x}").join("");
+
+      expect(() => pathToRegexp(segments)).toThrow(
+        new TypeError("Too many path combinations"),
       );
     });
   });
